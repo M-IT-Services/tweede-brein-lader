@@ -1,0 +1,15 @@
+{
+  "name": "m-it",
+  "description": "Pluginbron van M-IT Services voor het Tweede Brein.",
+  "owner": {
+    "name": "M-IT Services",
+    "url": "https://www.mitservices.nl"
+  },
+  "plugins": [
+    {
+      "name": "koppelstuk",
+      "source": "./plugins/koppelstuk",
+      "description": "Lader voor het koppelstuk van het Tweede Brein van M-IT Services: Outlook met het eigen Microsoft-account. Leest en zet klaar; verstuurt geen mail en verwijdert niets. Afspraken met anderen alleen na een klik van de medewerker."
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {"type": "command", "command": "python -X utf8 -E -s \"${CLAUDE_PLUGIN_ROOT}/scripts/bewaking.py\" prompt", "timeout": 10}
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "python -X utf8 -E -s \"${CLAUDE_PLUGIN_ROOT}/scripts/bewaking.py\" tool", "timeout": 10}
+        ]
+      }
+    ]
+  }
+}
