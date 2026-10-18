@@ -48,7 +48,8 @@ def rechten_uit(res):
     scope = res.get('scope') if isinstance(res, dict) else None
     if not isinstance(scope, str) or not scope.split():
         return None
-    return frozenset((kort(s) for s in scope.split()))
+    rechten = frozenset((kort(s) for s in scope.split())) - {'.default'}
+    return rechten or None
 
 def datamap():
     kandidaten = [os.environ.get('KOPPELSTUK_DATA'), os.environ.get('CLAUDE_PLUGIN_DATA')]

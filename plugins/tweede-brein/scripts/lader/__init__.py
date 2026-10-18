@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # (c) M-IT Services. Gebruik alleen volgens de licentievoorwaarden.
-LADER_VERSIE = '1.0.1'
+LADER_VERSIE = '1.0.2'
 API = 1
 MIN_PAKKET = '0.5.0'
 PLUGIN = 'tweede-brein'
