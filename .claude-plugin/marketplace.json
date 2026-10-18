@@ -7,9 +7,9 @@
   },
   "plugins": [
     {
-      "name": "koppelstuk",
-      "source": "./plugins/koppelstuk",
-      "description": "Lader voor het koppelstuk van het Tweede Brein van M-IT Services: Outlook met het eigen Microsoft-account. Leest en zet klaar; verstuurt geen mail en verwijdert niets. Afspraken met anderen alleen na een klik van de medewerker."
+      "name": "tweede-brein",
+      "source": "./plugins/tweede-brein",
+      "description": "Lader voor Koppelingen van het Tweede Brein van M-IT Services: Microsoft 365 met het eigen Microsoft-account. Leest en zet klaar; verstuurt geen mail en verwijdert niets. Schrijven in bestanden en afspraken met anderen alleen na een klik van de medewerker."
     }
   ]
 }

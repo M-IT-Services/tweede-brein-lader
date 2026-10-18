@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "koppelstuk": {
+    "koppelingen": {
       "command": "python",
       "args": ["-X", "utf8", "-E", "-s", "${CLAUDE_PLUGIN_ROOT}/scripts/start.py"],
       "env": {"KOPPELSTUK_DATA": "${CLAUDE_PLUGIN_DATA}"}

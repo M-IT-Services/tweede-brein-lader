@@ -7,7 +7,7 @@ import json
 import os
 import re
 import sys
-from . import API, DOMEIN, DREMPEL, KLIK_VERPLICHT, LADER_TOOLS, LADER_VERSIE, MAX_BESTANDEN, MAX_BUNDEL, MIN_PAKKET, SLEUTELS, ed25519
+from . import API, DOMEIN, DREMPEL, KLIK_VERPLICHT, LADER_TOOLS, LADER_VERSIE, MAX_BESTANDEN, MAX_BUNDEL, MIN_PAKKET, NOOIT, SLEUTELS, ed25519
 from .laden import laad, uitladen
 CODES = ('handtekening', 'opbouw', 'terugrol', 'laden', 'grens')
 VERSIE = re.compile('(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})')
@@ -16,6 +16,8 @@ BESTAND = re.compile('koppelstuk/[a-z_][a-z0-9_]*[.]py')
 TOOLNAAM = re.compile('[a-z][a-z0-9_]{0,63}')
 VERBODEN_WOORD = re.compile('send|verstu|verzend|delete|verwijder|forward|doorst', re.I)
 KLIK = 'anthropic/requiresUserInteraction'
+RECHT = re.compile('[A-Za-z][A-Za-z_.\\-]*')
+MAX_RECHTEN = 40
 
 class Weigering(Exception):
 
@@ -126,13 +128,14 @@ def controleer(envelop, sleutels=SLEUTELS, drempel=DREMPEL, vloer=None, min_pakk
 
 class Geladen:
 
-    def __init__(self, lader, module, toolset, tools, versie, sha256):
+    def __init__(self, lader, module, toolset, tools, versie, sha256, rechten=frozenset()):
         self.lader = lader
         self.module = module
         self.toolset = toolset
         self.tools = tools
         self.versie = versie
         self.sha256 = sha256
+        self.rechten = rechten
 
     def uit(self):
         uitladen(self.lader)
@@ -145,6 +148,7 @@ def laad_en_toets(g, omgeving):
     try:
         if getattr(module, '__version__', None) != g.versie or getattr(module, 'API', None) != API:
             raise Weigering('laden', 'versie of api in de code')
+        rechten = toets_rechten(module)
         toolset = module.maak(omgeving)
         tools = toolset.lijst()
     except Weigering:
@@ -158,7 +162,19 @@ def laad_en_toets(g, omgeving):
     except Weigering:
         uitladen(lader)
         raise
-    return Geladen(lader, module, toolset, tools, g.versie, g.sha256)
+    return Geladen(lader, module, toolset, tools, g.versie, g.sha256, rechten)
+
+def toets_rechten(module):
+    rechten = getattr(module, 'RECHTEN', None)
+    if not isinstance(rechten, (set, frozenset)) or not 1 <= len(rechten) <= MAX_RECHTEN:
+        raise Weigering('grens', 'RECHTEN ontbreekt of heeft een verkeerde omvang')
+    if not all((isinstance(r, str) and RECHT.fullmatch(r) for r in rechten)):
+        raise Weigering('grens', 'RECHTEN met een ongeldige naam')
+    klein = frozenset((r.lower() for r in rechten))
+    verboden = klein & {n.lower() for n in NOOIT}
+    if verboden:
+        raise Weigering('grens', f"RECHTEN met een recht uit NOOIT: {', '.join(sorted(verboden))}")
+    return klein
 
 def toets_tools(tools):
     if not isinstance(tools, list) or not tools:

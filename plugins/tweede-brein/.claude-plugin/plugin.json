@@ -1,0 +1,10 @@
+{
+  "name": "tweede-brein",
+  "version": "1.0.1",
+  "description": "Lader voor Koppelingen van het Tweede Brein van M-IT Services: Microsoft 365 met het eigen Microsoft-account. Leest en zet klaar; verstuurt geen mail en verwijdert niets. Schrijven in bestanden en afspraken met anderen alleen na een klik van de medewerker.",
+  "author": {
+    "name": "M-IT Services",
+    "url": "https://www.mitservices.nl"
+  },
+  "homepage": "https://www.mitservices.nl/ai-assistent"
+}

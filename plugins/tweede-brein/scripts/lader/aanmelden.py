@@ -17,34 +17,38 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from . import CLIENT_ID, KERN_SCOPE, LOGIN
+from . import CLIENT_ID, KERN_SCOPE, LOGIN, NOOIT
 from .transport import GeenVerbinding
-GRAPH = 'https://graph.microsoft.com/'
-OIDC = ['openid', 'profile', 'offline_access']
-RECHTEN = {'basis': ['User.Read'], 'outlook': ['Mail.ReadWrite', 'Mail.ReadWrite.Shared', 'Calendars.ReadWrite']}
-NOOIT = {'Mail.Send', 'Mail.Send.Shared', 'ChatMessage.Send', 'ChannelMessage.Send', 'Chat.ReadWrite', 'Mail.Send.All'}
+GRAPH_DEFAULT = 'https://graph.microsoft.com/.default'
 KLUIS_FORMAAT = 2
 GUID = re.compile('[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
 TOESTEMMING = ('AADSTS65001', 'AADSTS90094', 'AADSTS90095')
+TOEWIJZING = 'AADSTS50105'
+_NOOIT_KLEIN = frozenset((n.lower() for n in NOOIT))
+
+def kort(scope):
+    return scope.rsplit('/', 1)[-1].lower()
 
 def _toets(scopes):
-    verboden = {n.lower() for n in NOOIT}
     for s in scopes:
-        if s.rsplit('/', 1)[-1].lower() in verboden:
+        if kort(s) in _NOOIT_KLEIN:
             raise RuntimeError(f'Verboden recht in de lijst: {s}')
     return ' '.join(dict.fromkeys(scopes))
 
-def graph_rechten(onderdelen=('basis', 'outlook')):
-    return [GRAPH + r for o in onderdelen for r in RECHTEN[o]]
-
-def scope_authorize(onderdelen=('basis', 'outlook')):
-    return _toets(OIDC + [KERN_SCOPE] + graph_rechten(onderdelen))
+def scope_authorize():
+    return _toets(['openid', 'profile', 'offline_access', GRAPH_DEFAULT])
 
 def scope_kern():
-    return _toets(OIDC + [KERN_SCOPE])
+    return _toets(['openid', 'profile', 'offline_access', KERN_SCOPE])
 
-def scope_graph(onderdelen=('basis', 'outlook')):
-    return _toets(['offline_access'] + graph_rechten(onderdelen))
+def scope_graph():
+    return _toets(['offline_access', GRAPH_DEFAULT])
+
+def rechten_uit(res):
+    scope = res.get('scope') if isinstance(res, dict) else None
+    if not isinstance(scope, str) or not scope.split():
+        return None
+    return frozenset((kort(s) for s in scope.split()))
 
 def datamap():
     kandidaten = [os.environ.get('KOPPELSTUK_DATA'), os.environ.get('CLAUDE_PLUGIN_DATA')]
@@ -135,6 +139,8 @@ def _post(url, velden):
             uit = json.loads(e.read())
         except _ANTWOORDFOUTEN:
             uit = {}
+        finally:
+            e.close()
         if not isinstance(uit, dict) or 'error' not in uit:
             uit = {'error': f'http_{e.code}'}
         return uit
@@ -171,6 +177,12 @@ class NietAangemeld(Exception):
 class ToestemmingNodig(Exception):
     pass
 
+class GeenToewijzing(Exception):
+    pass
+
+class TeVeelRechten(Exception):
+    pass
+
 class Aanmelding:
 
     def __init__(self, kluis=None, post=_post, open_browser=webbrowser.open, klok=time.time, wacht_browser=300):
@@ -195,6 +207,10 @@ class Aanmelding:
         c = self._kluis()
         return {'account': c.get('account', ''), 'tenant': c.get('tenant', '')}
 
+    def rechten(self):
+        r = ((self._kluis().get('tokens') or {}).get('graph') or {}).get('rechten')
+        return frozenset(r) if isinstance(r, list) and all((isinstance(x, str) for x in r)) else None
+
     def bezig(self):
         return bool(self._bezig and self._bezig.is_alive())
 
@@ -208,21 +224,49 @@ class Aanmelding:
         with self._slot:
             c = self._kluis()
             t = (c.get('tokens') or {}).get(soort) or {}
-            if not forceer and t.get('access_token') and (t.get('verloopt', 0) > self._klok() + 120):
+            if not forceer and t.get('access_token') and (t.get('verloopt', 0) > self._klok() + 120) and (soort != 'graph' or isinstance(t.get('rechten'), list)):
                 return t['access_token']
             if not c.get('refresh_token'):
                 raise NietAangemeld()
-            tenant = c.get('tenant') if GUID.fullmatch(c.get('tenant') or '') else 'organizations'
-            res = self._post(f'{LOGIN}/{tenant}/oauth2/v2.0/token', {'client_id': CLIENT_ID, 'grant_type': 'refresh_token', 'refresh_token': c['refresh_token'], 'scope': scope})
-            if 'access_token' not in res:
-                self._fout(res)
-            self._bewaar(soort, res)
+            res = self._vernieuw(c.get('tenant'), c['refresh_token'], scope)
+            rechten = self._graph_antwoord(c.get('tenant'), res) if soort == 'graph' else None
+            self._bewaar(soort, res, rechten=rechten)
             return res['access_token']
+
+    def _vernieuw(self, tenant, refresh_token, scope):
+        tenant = tenant if GUID.fullmatch(str(tenant or '')) else 'organizations'
+        res = self._post(f'{LOGIN}/{tenant}/oauth2/v2.0/token', {'client_id': CLIENT_ID, 'grant_type': 'refresh_token', 'refresh_token': refresh_token, 'scope': scope})
+        if 'access_token' not in res:
+            self._fout(res)
+        return res
+
+    def _graph_antwoord(self, tenant, res):
+        rechten = self._toets_antwoord(res)
+        if rechten is None:
+            nieuw = self._vernieuw(tenant, res.get('refresh_token') or self._kluis().get('refresh_token') or '', scope_graph())
+            rechten = self._toets_antwoord(nieuw)
+            if rechten is None:
+                raise NietAangemeld('SCOPE')
+            id_token = res.get('id_token')
+            res.clear()
+            res.update(nieuw)
+            if id_token and (not res.get('id_token')):
+                res['id_token'] = id_token
+        return rechten
+
+    @staticmethod
+    def _toets_antwoord(res):
+        rechten = rechten_uit(res)
+        if rechten is not None and rechten & _NOOIT_KLEIN:
+            raise TeVeelRechten(', '.join(sorted(rechten & _NOOIT_KLEIN)))
+        return rechten
 
     def _fout(self, res):
         fout, code = (str(res.get('error') or ''), _aadsts(res))
         if fout == 'consent_required' or code in TOESTEMMING:
             raise ToestemmingNodig(code)
+        if code == TOEWIJZING:
+            raise GeenToewijzing(code)
         if fout in ('invalid_grant', 'interaction_required'):
             self.kluis.weg()
             raise NietAangemeld(code)
@@ -230,11 +274,13 @@ class Aanmelding:
             raise GeenVerbinding(fout)
         raise NietAangemeld(code)
 
-    def _bewaar(self, soort, res, nieuw=False):
+    def _bewaar(self, soort, res, nieuw=False, rechten=None):
         c = {'formaat': KLUIS_FORMAAT, 'tokens': {}} if nieuw else self._kluis()
         if not c:
             raise NietAangemeld()
         c.setdefault('tokens', {})[soort] = {'access_token': res['access_token'], 'verloopt': self._klok() + int(res.get('expires_in', 3600))}
+        if rechten is not None:
+            c['tokens'][soort]['rechten'] = sorted(rechten)
         if res.get('refresh_token'):
             c['refresh_token'] = res['refresh_token']
         if res.get('id_token'):
@@ -284,15 +330,25 @@ class Aanmelding:
             if antwoord.get('error'):
                 tekst = antwoord.get('error', '') + ' ' + antwoord.get('error_description', '')
                 code = (re.search('AADSTS\\d{4,6}', tekst) or [''])[0]
-                self.fout = ('toestemming' if 'consent' in tekst or code in TOESTEMMING else 'mislukt', code)
+                if code == TOEWIJZING:
+                    self.fout = ('toewijzing', code)
+                else:
+                    self.fout = ('toestemming' if 'consent' in tekst or code in TOESTEMMING else 'mislukt', code)
                 return
             try:
-                res = self._post(f'{LOGIN}/organizations/oauth2/v2.0/token', {'client_id': CLIENT_ID, 'grant_type': 'authorization_code', 'code': antwoord['code'], 'redirect_uri': omleiding, 'code_verifier': verifier, 'scope': scope_kern()})
+                res = self._post(f'{LOGIN}/organizations/oauth2/v2.0/token', {'client_id': CLIENT_ID, 'grant_type': 'authorization_code', 'code': antwoord['code'], 'redirect_uri': omleiding, 'code_verifier': verifier, 'scope': scope_authorize()})
                 with self._slot:
                     if 'access_token' not in res or 'id_token' not in res:
                         self._fout(res if 'access_token' not in res else {'error': 'geen_id_token'})
-                    self._bewaar('kern', res, nieuw=True)
-                    self.token_graph(forceer=True)
+                    rechten = self._graph_antwoord(_claims(res['id_token']).get('tid'), res)
+                    self._bewaar('graph', res, nieuw=True, rechten=rechten)
+                    self.token_kern(forceer=True)
+            except TeVeelRechten:
+                self.fout = ('rechten', '')
+                return
+            except GeenToewijzing as e:
+                self.fout = ('toewijzing', str(e))
+                return
             except ToestemmingNodig as e:
                 self.fout = ('toestemming', str(e))
                 return

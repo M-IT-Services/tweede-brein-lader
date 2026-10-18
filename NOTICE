@@ -1,7 +1,7 @@
-Tweede Brein – lader voor het koppelstuk
+Tweede Brein – lader voor Koppelingen
 Copyright (c) 2026 M-IT Services. Alle rechten voorbehouden, met uitzondering van het onderstaande.
 
-plugins/koppelstuk/scripts/lader/ed25519.py is gebaseerd op de referentie-implementatie in RFC 8032
+plugins/tweede-brein/scripts/lader/ed25519.py is gebaseerd op de referentie-implementatie in RFC 8032
 (Edwards-Curve Digital Signature Algorithm (EdDSA), S. Josefsson en I. Liusvaara, januari 2017),
 sectie 6, en valt voor dat deel onder de volgende licentie:
 

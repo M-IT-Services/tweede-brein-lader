@@ -8,19 +8,22 @@ import sys
 import threading
 import time
 import traceback
-from . import DREMPEL, HANDMATIG_PER_S, HERCONTROLE_S, LADER_TOOLS, LADER_VERSIE, MIN_PAKKET, RETRY_AFTER_S, SLEUTELS, STORINGSMARGE_S, WACHT_AANMELDEN_S, WACHT_LIJST_S, ZINNEN
+from . import DREMPEL, HANDMATIG_PER_S, HERCONTROLE_S, LADER_TOOLS, LADER_VERSIE, MIN_PAKKET, OIDC, RETRY_AFTER_S, SERVER, SERVER_TITEL, SLEUTELS, STORINGSMARGE_S, WACHT_AANMELDEN_S, WACHT_LIJST_S, ZINNEN
 from . import pakket
-from .aanmelden import Aanmelding, NietAangemeld, ToestemmingNodig, datamap
+from .aanmelden import Aanmelding, GeenToewijzing, NietAangemeld, TeVeelRechten, ToestemmingNodig, datamap
 from .ophalen import Ophaler
-from .transport import GeenVerbinding, Transport, TransportGeweigerd
+from .transport import GeenVerbinding, TeGroot, Transport, TransportGeweigerd
+from .uitwisseling import UitwisselFout, Uitwisseling
 PROTOCOLLEN = ('2025-06-18', '2025-03-26', '2024-11-05')
-INSTRUCTIES = 'Koppelstuk van het Tweede Brein (M-IT Services): de eigen Outlook van de medewerker. Volg de werkwijze voor Koppelingen uit kern_start. Zie je alleen aanmelden, aanmeldstatus en afmelden, roep dan aanmeldstatus aan en geef de zin door.'
+INSTRUCTIES = 'Koppelingen van het Tweede Brein (M-IT Services): Microsoft 365 van de medewerker, met het eigen account. Volg de werkwijze voor Koppelingen uit kern_start. Zie je alleen aanmelden, aanmeldstatus en afmelden, roep dan aanmeldstatus aan en geef de zin door.'
 LEES = {'readOnlyHint': True, 'destructiveHint': False, 'openWorldHint': False}
 SCHRIJF = {'readOnlyHint': False, 'destructiveHint': False, 'openWorldHint': False}
 _LEEG = {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False}
-LADER_TOOLDEFS = [{'name': 'aanmelden', 'description': 'Meld de medewerker aan bij Microsoft met het eigen account. Opent een venster in de browser.', 'inputSchema': _LEEG, 'annotations': SCHRIJF}, {'name': 'aanmeldstatus', 'description': 'Laat zien of en als wie de medewerker is aangemeld, en of het koppelstuk werkt.', 'inputSchema': _LEEG, 'annotations': LEES}, {'name': 'afmelden', 'description': 'Haalt de aanmelding van deze laptop weg. Er verandert niets in de postbus.', 'inputSchema': _LEEG, 'annotations': SCHRIJF}]
+LADER_TOOLDEFS = [{'name': 'aanmelden', 'description': 'Meld de medewerker aan bij Microsoft 365. De medewerker kiest in de standaardbrowser zelf het account.', 'inputSchema': _LEEG, 'annotations': SCHRIJF}, {'name': 'aanmeldstatus', 'description': 'Laat zien of en als wie de medewerker is aangemeld, en of Koppelingen werkt.', 'inputSchema': _LEEG, 'annotations': LEES}, {'name': 'afmelden', 'description': 'Haalt de aanmelding van deze laptop weg. Er verandert niets in Microsoft 365.', 'inputSchema': _LEEG, 'annotations': SCHRIJF}]
 assert tuple((t['name'] for t in LADER_TOOLDEFS)) == LADER_TOOLS
-ZIN_BIJ = {'niet_aangemeld': 'aanmelden', 'bezig': 'start', 'offline': 'offline', 'storing': 'storing', 'licentie': 'licentie', 'toegang': 'toegang', 'te_oud': 'te_oud', 'toestemming': 'toestemming'}
+ZIN_BIJ = {'niet_aangemeld': 'aanmelden', 'bezig': 'start', 'offline': 'offline', 'storing': 'storing', 'licentie': 'licentie', 'toegang': 'toegang', 'te_oud': 'te_oud', 'toestemming': 'toestemming', 'toewijzing': 'toewijzing', 'rechten': 'rechten'}
+EIGEN_ZIN = ('toestemming', 'toewijzing', 'rechten')
+STOP = ('licentie', 'toegang', 'niet_aangemeld', 'toestemming', 'toewijzing', 'rechten', 'te_oud')
 
 def _tekst(t, fout=False):
     return {'content': [{'type': 'text', 'text': str(t)}], 'isError': fout}
@@ -39,18 +42,40 @@ def _cet(ts):
     return (utc + dt.timedelta(hours=2 if zomer else 1)).strftime('%H:%M')
 
 class Omgeving:
+    GeenVerbinding = GeenVerbinding
 
-    def __init__(self, token_graph, verzend):
-        self.token_graph = token_graph
+    def __init__(self, aanmelding, verzend, uitwisseling=None, toegestaan=None):
+        self._aanmelding = aanmelding
         self.verzend = verzend
+        self._uitwisseling = uitwisseling or Uitwisseling()
+        self.toegestaan = toegestaan
+
+    def token_graph(self):
+        token = self._aanmelding.token_graph()
+        r = self._aanmelding.rechten()
+        if r is None:
+            raise NietAangemeld('SCOPE')
+        if self.toegestaan is None or not r <= self.toegestaan:
+            raise TeVeelRechten(', '.join(sorted(r - (self.toegestaan or frozenset()))))
+        return token
+
+    def rechten(self):
+        return self._aanmelding.rechten() or frozenset()
+
+    def lokaal_lezen(self, naam):
+        return self._uitwisseling.lees(naam)
+
+    def lokaal_schrijven(self, naam, data):
+        return self._uitwisseling.schrijf(naam, data)
 
 class Sessie:
 
-    def __init__(self, aanmelding=None, ophaler=None, transport=None, vloer=None, klok=time.time, uit=None, sleutels=SLEUTELS, drempel=DREMPEL, min_pakket=MIN_PAKKET, wacht_lijst=WACHT_LIJST_S, wacht_aanmelden=WACHT_AANMELDEN_S):
+    def __init__(self, aanmelding=None, ophaler=None, transport=None, vloer=None, klok=time.time, uit=None, sleutels=SLEUTELS, drempel=DREMPEL, min_pakket=MIN_PAKKET, wacht_lijst=WACHT_LIJST_S, wacht_aanmelden=WACHT_AANMELDEN_S, uitwisseling=None):
         self.aanmelding = aanmelding or Aanmelding()
         self.ophaler = ophaler or Ophaler()
         self.transport = transport or Transport()
         self.vloer = vloer or pakket.Vloer(os.path.join(datamap(), 'pakket-stand.json'))
+        self.uitwisseling = uitwisseling or Uitwisseling(datamap=os.path.dirname(os.path.abspath(self.vloer.pad)))
         self.klok = klok
         self._uit = uit or sys.stdout
         self.sleutels, self.drempel, self.min_pakket = (sleutels, drempel, min_pakket)
@@ -95,7 +120,7 @@ class Sessie:
 
     def _ronde(self, functie, achtergrond=True):
         with self._staat:
-            if self._ronde_draad is not None and self._ronde_draad.is_alive():
+            if not self._klaar.is_set():
                 return False
             if self.geladen is None and functie == self._ophalen_en_laden:
                 self.toestand = 'bezig'
@@ -128,8 +153,7 @@ class Sessie:
             self._klaar.set()
 
     def ronde_loopt(self):
-        d = self._ronde_draad
-        return d is not None and d.is_alive()
+        return not self._klaar.is_set()
 
     def wacht(self, tijd=10):
         return self._klaar.wait(tijd)
@@ -141,25 +165,27 @@ class Sessie:
             traceback.print_exc(file=sys.stderr)
             return 'storing'
 
-    def _haal_ruw(self, heeft, weigering):
+    def _kerntoken(self, forceer=False):
         try:
-            token = self.aanmelding.token_kern()
+            return (self.aanmelding.token_kern(forceer=forceer), None)
         except NietAangemeld:
-            return 'niet_aangemeld'
+            return (None, 'niet_aangemeld')
         except ToestemmingNodig:
-            return 'toestemming'
+            return (None, 'toestemming')
+        except GeenToewijzing:
+            return (None, 'toewijzing')
         except GeenVerbinding:
-            return 'offline'
+            return (None, 'offline')
+
+    def _haal_ruw(self, heeft, weigering):
+        token, toestand = self._kerntoken()
+        if toestand:
+            return toestand
         uit = self.ophaler.haal(token, heeft=heeft, weigering=weigering)
         if uit.toestand == 'niet_aangemeld':
-            try:
-                token = self.aanmelding.token_kern(forceer=True)
-            except NietAangemeld:
-                return 'niet_aangemeld'
-            except ToestemmingNodig:
-                return 'toestemming'
-            except GeenVerbinding:
-                return 'offline'
+            token, toestand = self._kerntoken(forceer=True)
+            if toestand:
+                return toestand
             uit = self.ophaler.haal(token, heeft=heeft)
         return uit
 
@@ -195,8 +221,27 @@ class Sessie:
             else:
                 self.volgende = nu + HERCONTROLE_S
 
+    def _rechten_bij_laden(self, toegestaan):
+        r = self.aanmelding.rechten()
+        if r is None or r <= toegestaan:
+            return None
+        try:
+            self.aanmelding.token_graph(forceer=True)
+        except TeVeelRechten:
+            return 'rechten'
+        except NietAangemeld:
+            return 'niet_aangemeld'
+        except ToestemmingNodig:
+            return 'toestemming'
+        except GeenToewijzing:
+            return 'toewijzing'
+        except GeenVerbinding:
+            return 'rechten'
+        r = self.aanmelding.rechten()
+        return None if r is not None and r <= toegestaan else 'rechten'
+
     def _laad(self, envelop, sessie):
-        omgeving = Omgeving(self.aanmelding.token_graph, self.transport.verzend)
+        omgeving = Omgeving(self.aanmelding, self.transport.verzend, self.uitwisseling)
         try:
             with self._pakketslot:
                 if self._sessie != sessie:
@@ -204,6 +249,15 @@ class Sessie:
                 g = pakket.controleer(envelop, self.sleutels, self.drempel, self.vloer.lees(), self.min_pakket)
                 oud = self.geladen
                 nieuw = pakket.laad_en_toets(g, omgeving)
+                omgeving.toegestaan = nieuw.rechten | OIDC
+                fout = self._rechten_bij_laden(omgeving.toegestaan)
+                if fout:
+                    nieuw.uit()
+                    sys.stderr.write(f'koppelstuk: rechtentoets na het laden ({fout})\n')
+                    self._uitladen(fout)
+                    with self._staat:
+                        self.volgende = None
+                    return
                 with self._staat:
                     self.geladen = nieuw
                     self.toestand, self.reden = ('geladen', '')
@@ -263,7 +317,7 @@ class Sessie:
             with self._staat:
                 self.laatste_ok = self.klok()
                 self.nieuwste = uit.nieuwste
-        elif t in ('licentie', 'toegang', 'niet_aangemeld', 'toestemming', 'te_oud'):
+        elif t in STOP:
             self._uitladen(t)
             with self._staat:
                 self.volgende = None
@@ -292,11 +346,19 @@ class Sessie:
 
     def _na_aanmelden(self):
         with self._staat:
+            self._sessie += 1
             self._na_retry = False
             self.volgende = None
             geladen = self.geladen is not None
-        if not geladen and (not self.geen_poging):
-            self._ronde(self._ophalen_en_laden)
+        if geladen:
+            self._uitladen('bezig', meld=False)
+        if self.geen_poging:
+            return
+        if self.ronde_loopt():
+            self._klaar.wait(self.wacht_lijst)
+        if not self._ronde(self._ophalen_en_laden):
+            with self._staat:
+                self.volgende = self.klok()
 
     def _probeer_handmatig(self):
         if self.geladen is not None or self.geen_poging or (not self.aanmelding.aangemeld()):
@@ -334,8 +396,12 @@ class Sessie:
             toestand, reden = (self.toestand, self.reden)
         if toestand == 'controle':
             return ZINNEN['controle'].format(reden=reden.upper())
-        if not self.aanmelding.aangemeld() and toestand != 'toestemming':
+        if not self.aanmelding.aangemeld() and toestand not in EIGEN_ZIN:
             return ZINNEN['aanmelden']
+        if toestand == 'toegang':
+            account = self.aanmelding.gegevens().get('account')
+            if account:
+                return ZINNEN['toegang_account'].format(account=account)
         return ZINNEN[ZIN_BIJ.get(toestand, 'storing')]
 
     def status_tekst(self):
@@ -344,13 +410,13 @@ class Sessie:
         g, wie = (self.geladen, self.aanmelding.gegevens())
         if g is None:
             zin = self._zin()
-            if wie['account'] and self.aanmelding.aangemeld() and (self.toestand != 'niet_aangemeld'):
+            if wie['account'] and self.aanmelding.aangemeld() and (self.toestand not in ('niet_aangemeld', 'toegang')):
                 return f"Aangemeld als {wie['account']}. {zin}"
             return zin
-        tekst = f"Aangemeld als {wie['account'] or '?'} (organisatie {wie['tenant'] or '?'}). Koppelstuk {g.versie} met lader {LADER_VERSIE}. Laatste controle: {_cet(self.laatste_ok)} (Nederlandse tijd)."
+        tekst = f"Aangemeld als {wie['account'] or '?'} (organisatie {wie['tenant'] or '?'}). Koppelingen {g.versie} met lader {LADER_VERSIE}. Laatste controle: {_cet(self.laatste_ok)} (Nederlandse tijd)."
         n = pakket.versie(self.nieuwste)
         if n and n > pakket.versie(g.versie):
-            tekst += f' Versie {self.nieuwste} staat klaar; die geldt vanaf een nieuwe sessie.'
+            tekst += f' Versie {self.nieuwste} staat klaar.'
         return tekst
 
     def roep(self, naam, args):
@@ -363,14 +429,15 @@ class Sessie:
             return self._tool_afmelden()
         if self.geladen is None and self.ronde_loopt():
             self._klaar.wait(self.wacht_lijst)
-        opnieuw = False
+        stop = None
         with self._pakketslot:
             g = self.geladen
             if g is None:
                 return _tekst(self._zin(), fout=True)
-            schema = {t['name']: t['inputSchema'] for t in g.tools}.get(naam)
-            if schema is None:
+            tool = {t['name']: t for t in g.tools}.get(naam)
+            if tool is None:
                 return _tekst(f'Onbekende tool: {str(naam)[:80]}', fout=True)
+            schema = tool['inputSchema']
             if args is None:
                 args = {}
             if not isinstance(args, dict):
@@ -381,25 +448,39 @@ class Sessie:
             ontbreekt = [v for v in schema.get('required', []) if args.get(v) in (None, '', [])]
             if ontbreekt:
                 return _tekst(f"Verplicht: {', '.join(ontbreekt)}", fout=True)
+            self.transport.klik = (tool.get('_meta') or {}).get(pakket.KLIK) is True
             try:
                 uit = g.toolset.roep(naam, dict(args))
                 if not isinstance(uit, dict) or not isinstance(uit.get('content'), list) or (not isinstance(uit.get('isError', False), bool)):
                     raise TypeError('antwoord van het pakket')
                 return uit
             except NietAangemeld:
-                opnieuw = True
+                stop = ('niet_aangemeld', 'opnieuw')
+            except TeVeelRechten:
+                stop = ('rechten', 'rechten')
             except ToestemmingNodig:
                 return _tekst(ZINNEN['toestemming'], fout=True)
+            except GeenToewijzing:
+                return _tekst(ZINNEN['toewijzing'], fout=True)
             except GeenVerbinding:
                 return _tekst(ZINNEN['offline'], fout=True)
+            except TeGroot:
+                return _tekst(ZINNEN['te_groot'], fout=True)
             except TransportGeweigerd:
                 return _tekst(ZINNEN['grens'], fout=True)
+            except UitwisselFout as e:
+                return _tekst(str(e), fout=True)
             except Exception as e:
                 traceback.print_exc(file=sys.stderr)
-                return _tekst(f'Onverwachte fout in het koppelstuk: {type(e).__name__}', fout=True)
-        if opnieuw:
-            self._uitladen('niet_aangemeld')
-            return _tekst(ZINNEN['opnieuw'], fout=True)
+                return _tekst(f'Onverwachte fout in Koppelingen: {type(e).__name__}', fout=True)
+            finally:
+                self.transport.klik = False
+        toestand, zin = stop
+        self._uitladen(toestand)
+        if toestand == 'rechten':
+            with self._staat:
+                self.volgende = None
+        return _tekst(ZINNEN[zin], fout=True)
 
     def _tool_aanmelden(self):
         status, url = self.aanmelding.start(wacht=self.wacht_aanmelden, na=self._na_aanmelden)
@@ -407,7 +488,11 @@ class Sessie:
             return _tekst(ZINNEN['browser'].format(url=url))
         if status == 'fout':
             soort, code = self.aanmelding.fout or ('mislukt', '')
-            if soort in ('toestemming', 'offline'):
+            if soort == 'rechten':
+                self._uitladen('rechten')
+                with self._staat:
+                    self.volgende = None
+            if soort in ('toestemming', 'offline', 'toewijzing', 'rechten'):
                 return _tekst(ZINNEN[soort], fout=True)
             return _tekst(ZINNEN['mislukt'].format(code=f', {code}' if code else ''), fout=True)
         if self.geladen is None and self.ronde_loopt():
@@ -430,7 +515,7 @@ class Sessie:
         params = bericht.get('params') if isinstance(bericht.get('params'), dict) else {}
         if methode == 'initialize':
             gevraagd = params.get('protocolVersion')
-            resultaat = {'protocolVersion': gevraagd if gevraagd in PROTOCOLLEN else PROTOCOLLEN[0], 'capabilities': {'tools': {'listChanged': True}}, 'serverInfo': {'name': 'koppelstuk', 'title': 'M-IT Koppelstuk', 'version': LADER_VERSIE}, 'instructions': INSTRUCTIES}
+            resultaat = {'protocolVersion': gevraagd if gevraagd in PROTOCOLLEN else PROTOCOLLEN[0], 'capabilities': {'tools': {'listChanged': True}}, 'serverInfo': {'name': SERVER, 'title': SERVER_TITEL, 'version': LADER_VERSIE}, 'instructions': INSTRUCTIES}
         elif methode == 'ping':
             resultaat = {}
         elif methode == 'tools/list':
